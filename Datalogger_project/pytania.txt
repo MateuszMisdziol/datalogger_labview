@@ -1,0 +1,9 @@
+Datalogger:
+
+Czy LatestAccElement mógłby być Handshak'iem?
+Jak działa to zatrzaskiwanie feedback node'm i greater?
+Dlaczego zakładamy w RT FIFO, że wysyłamy tylko w jednym momencie 3200 (3500) elelmentów
+czyli połowe, a nie wszystkie dane przed i po triggerze?
+
+CLAD:
+P4 strona 12 pdf prep_guide_polish

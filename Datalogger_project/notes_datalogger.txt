@@ -1,0 +1,36 @@
+FPGA_main.vi
+
+I pętla:
+Mamy czujnik przyspieszenia, który pracuje z f = 800Hz,
+wiec mamy odczyt tych danych co 1250us i tak tez ustawiamy czas wykonywania naszej petli while.
+Dane z czujnika czyli acceleration X Y Z zapisywane są do clustra, ktory jest typdefem.
+Nstepnie stosujemy single cycled time loop, ktora jest taktowana zegarem naszego urzadzenia (40MHz).
+Nasze dane z clustra zapisujemy do block memory, ktory adresujemy za pomoca licznika liczacego do 8000.
+Skoro nasz czujnik wykonuje odczyt 800 razy na sekunde, wiec do pamieci zapisujemy dane z 10 sekund.
+Używamy też kolejki FIFO w trybie target-scoped do przesyłania ostatniego elementu do drugiej pętli
+do monitorowania danych. W SCTL sprawdzamy również czy nie występuje trigger, który sygnalizuje o 
+gwałtownej zmianie przyspieszenia. Wykonujemy to w małym podprogramie, który sprawdza każdą 
+wartość X Y Z z osobna czy nie wystąpiło przekroczenie zadanego limitu. Ustawiamy rówież ile tych
+przekroczeń musi wystąpić, aby załączył się trigger. Zapinamy tam również feedback node, aby zatrzasnąć wartość jeśli wystąpiła już wymagana liczba przekroczeń, aby nie doprowadzić do przekręcenia się tej wartości, ponieważ jest to liczba mała typu U8. Wracając do naszej pętli SCTL, sprawdzamy czy wystąpił trigger na którejść z wartości X Y Z. Jeśli tak to zatrzaskujemy stan tego triggera, żeby ta wartość już pozostała. Jeśli trigger wystąpił to za pomocą jednoelementowej kolejki FIFO czyli Handshake przesyłamy adres elementu który wygenerował trigger do drugiej pętli while.
+
+II pętla:
+Architektura opiera się na maszynie stanów, tworzymy enum typedef ze stanami kolejno: Idle, Monitoring, SendPreTriggerData, SendPostTriggerData.
+
+Idle:
+Za pomocą przycisku możemy przejść do stanu Monitoring. Dodatkowo sprawdzając Handshake Trigger jeśli wystąpi przechodzimy do stanu SendPreTriggerData. Tworzymy również 2 zmienne Pre/PostTriggerDataLength za pomocą których ustawiamy ile danych chcemy zapisać przed i po triggerze. Jeśli wystąpił trigger odczytujemy z Handshake Trigger adres (moment) tego triggera i odejmujemy od niego PreTriggerDataLength, aby otrzymać adres pierwszego elementu PreTriggera. Wpisujemy go do shift registera, aby korzystać z niego w innych stanach. Odejmowanie to musi być zabezpieczone przed ujemnymi wartościami. Nasze wartości są zapisane w pamięci w komórkach 0-7999, jeśli PreTriggerDataLength będzie większe od adresu Triggera otrzymamy liczbe ujemną, więc musimy dodać rozmiar naszego bufora czyli 8000, aby poprawnie znaleźć nasz pierwszy element, ponieważ dane są zapisywane "w kółko". Dodatkowo adres Triggera jest jednocześnie ostatnim elementem PreTriggera i zapisujemy go do rejestru, aby skorzystać z niego w innym stanie. Cały czas jesteśmy gotowi do odbioru danych z LatestAccElement. W stanie Idle nie wysyłamy do naszego Hosta żadnych danych.
+
+Monitoring:
+Odczytujemy elementy z LatestAccElement, odpowiednio je rozpakowywujemy i wysyłamy do kolejki FIFO ToHostData, która jest typu Target to Host - DMA. Cały czas jesteśmy gotowi do odbioru danych z LatestAccElement.
+
+SendPreTriggerData:
+Odczytujemy dane z pamięci Accelerations zaczynając od adresu piewrszego elementu pre triggera, który jest w rejestrze przesuwnym. Licznik ten inkrementujemy, aż do ostatniego adresu 8000 lub do adresu LastPreTriggerElement. Jeśli dojdziemy do ostatniego elementu pre triggera to przechodzimy do stanu SendPostTriggerData, a jeśli najpierw osiągniemy adres 7999 to wracamy na początek i czytamy dalej. Odczyt pamięci Accelerations wymaga opóźnienia x2 zrealizowanego za pomocą feedback node, w takim wypadku musimy również opóźnić wpisywanie do kolejki ToHostData x2 w taki sam sposób. Z racji tych opóźnień ten stan musi wykonać się o 2 iteracje dłużej, dlatego też musimy +2 do LastPreTriggerElement. 
+W tym stanie nie jesteśmy gotowi do odczytywania nowych elementów z LatestAccElement.
+
+SendPostTriggerData:
+Ten stan może się wykonać jedynie, gdy wyślemy do Hosta wszystkie elementy PreTriggerData dlatego licznik aktualnego adresu jest w poprawnym miejscu czyli na pierwszym elemencie PostTriggerData. Tutaj dane odczytujemy z kolejki FIFO LatestAccElement, jeśli dana jest "valid" to wpisujemy ją do ToHostData. Cały czas jesteśmy gotowi na jej odczyt w tym stanie. Odczytujemy tyle danych ile jest zadanych w zmiennej PostTriggerDataLength. Jeśli odczytamy wszystkie do wracamy do stanu Idle oraz wpisujemy 1 w ostatnie miejsce naszych danych X Y Z, aby wiedzieć, że była to ostania dana, wykorzystmy to poźniej w systemie czasu rzeczywistego.
+
+RealTime_main.vi
+Otwieramy referencje nasego FPGA_main następnie inicjalizujemy wartości naszych zmiennych. Konfigurujemy wielkość naszego ToHostData, ponieważ w systemach RT nei chcemy alokować pamięci dyanmiecznie i rozpoczynamy jego pracę. Startujemy program. Następnie w pętli, która wykonuje się co 100ms będziemy sterować naszymi zmiennymi i czytać nasze elelmetny. Najpierw czytamy 0 elementów, aby sprawdzić ile ich jest, a następnie je wszystkie odczytujemy i wpisujemy do kolejki FIFO.
+
+II pętla
+Przed pętlą tworzymy kolejke RT FIFO, następnie inicjalizujemy tablicę do której będziemy wpisywać dane i odczytujemy je z kolejki. Następnie dopisujemy elementy do tablicy za pomocą concatenate inputs, ale przed dopisaniem taką samą liczbę elementów powinniśmy skasować z tablicy, aby jej nie przepełnić. Jednocześnie wszystko odczytujemy na wykresie. Jeśli na ostatnim miejscu naszych odczytywanych jest 1, którą specjalnie tam wpisywaliśmy, aby poinformować o zapisaniu ostatniego elelmetu PostTriggerData to wtedy możemy zapisać do pliku nasze dane. Aby plik zapisał się tylko raz stosujemy feedback node, w przeciwnym razie plików zapisywałoby się bardzo dużo tyle ile razy odczytamy tą 1 na końcu naszych danych.
